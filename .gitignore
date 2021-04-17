@@ -2,3 +2,5 @@ Data/
 pyenv/
 
 *.pyc
+.scrapy
+.idea

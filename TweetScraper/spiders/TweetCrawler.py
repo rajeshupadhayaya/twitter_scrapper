@@ -1,4 +1,5 @@
 from scrapy.spiders import CrawlSpider, Rule
+import scrapy
 from scrapy.selector import Selector
 from scrapy import http
 from scrapy.shell import inspect_response  # for debugging
@@ -6,6 +7,9 @@ import re
 import json
 import time
 import logging
+
+from TweetScraper.keywords import search_keywords
+
 try:
     from urllib import quote  # Python 2.X
 except ImportError:
@@ -21,9 +25,10 @@ logger = logging.getLogger(__name__)
 class TweetScraper(CrawlSpider):
     name = 'TweetScraper'
     allowed_domains = ['twitter.com']
+    extract_more = True
 
     def __init__(self, query='', lang='', crawl_user=False, top_tweet=False):
-
+        self.current_date = datetime.now()
         self.query = query
         self.url = "https://twitter.com/i/search/timeline?l={}".format(lang)
 
@@ -35,21 +40,37 @@ class TweetScraper(CrawlSpider):
         self.crawl_user = crawl_user
 
     def start_requests(self):
-        url = self.url % (quote(self.query), '')
-        yield http.Request(url, callback=self.parse_page)
+        if self.query:
+            url = self.url % (quote(self.query), '')
+            yield http.Request(url, callback=self.parse_page)
+        else:
+            for query in search_keywords:
+                self.extract_more = True
+                url = self.url % (quote(query), '')
+                print(query)
+                yield scrapy.Request(url, callback=self.parse_page, meta={'query': query})
 
     def parse_page(self, response):
         # inspect_response(response, self)
         # handle current page
         data = json.loads(response.body.decode("utf-8"))
+
         for item in self.parse_tweets_block(data['items_html']):
             yield item
 
         # get next page
         min_position = data['min_position']
-        min_position = min_position.replace("+","%2B")
-        url = self.url % (quote(self.query), min_position)
-        yield http.Request(url, callback=self.parse_page)
+        min_position = min_position.replace("+", "%2B")
+
+        if self.extract_more:
+            if self.query:
+                url = self.url % (quote(self.query), min_position)
+                yield http.Request(url, callback=self.parse_page)
+
+            else:
+                query = response.meta['query']
+                url = self.url % (quote(query), min_position)
+                yield scrapy.Request(url, callback=self.parse_page, meta={'query': query})
 
     def parse_tweets_block(self, html_page):
         page = Selector(text=html_page)
@@ -64,7 +85,8 @@ class TweetScraper(CrawlSpider):
             try:
                 tweet = Tweet()
 
-                tweet['usernameTweet'] = item.xpath('.//span[@class="username u-dir u-textTruncate"]/b/text()').extract()[0]
+                tweet['usernameTweet'] = \
+                item.xpath('.//span[@class="username u-dir u-textTruncate"]/b/text()').extract()[0]
 
                 ID = item.xpath('.//@data-tweet-id').extract()
                 if not ID:
@@ -103,10 +125,14 @@ class TweetScraper(CrawlSpider):
                     tweet['nbr_reply'] = int(nbr_reply[0])
                 else:
                     tweet['nbr_reply'] = 0
+                tweet_datetime = int(item.xpath('.//div[@class="stream-item-header"]/small[@class="time"]/a/span/@data-time').extract()[
+                        0])
 
-                tweet['datetime'] = datetime.fromtimestamp(int(
-                    item.xpath('.//div[@class="stream-item-header"]/small[@class="time"]/a/span/@data-time').extract()[
-                        0])).strftime('%Y-%m-%d %H:%M:%S')
+                tweet['datetime'] = datetime.fromtimestamp(tweet_datetime).strftime('%Y-%m-%d %H:%M:%S')
+
+                if (self.current_date - datetime.fromtimestamp(tweet_datetime)).days >= 365:
+                    print('date', self.current_date - datetime.fromtimestamp(tweet_datetime))
+                    self.extract_more = False
 
                 ### get photo
                 has_cards = item.xpath('.//@data-card-type').extract()
